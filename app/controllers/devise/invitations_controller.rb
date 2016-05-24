@@ -1,10 +1,19 @@
 class Devise::InvitationsController < DeviseController
+  if Rails::VERSION::MAJOR >= 5
+    prepend_before_action :authenticate_inviter!, :only => [:new, :create]
+    prepend_before_action :has_invitations_left?, :only => [:create]
+    prepend_before_action :require_no_authentication, :only => [:edit, :update, :destroy]
+    prepend_before_action :resource_from_invitation_token, :only => [:edit, :destroy]
+  else
+    prepend_before_filter :authenticate_inviter!, :only => [:new, :create]
+    prepend_before_filter :has_invitations_left?, :only => [:create]
+    prepend_before_filter :require_no_authentication, :only => [:edit, :update, :destroy]
+    prepend_before_filter :resource_from_invitation_token, :only => [:edit, :destroy]
+  end
 
-  prepend_before_filter :authenticate_inviter!, :only => [:new, :create]
-  prepend_before_filter :has_invitations_left?, :only => [:create]
-  prepend_before_filter :require_no_authentication, :only => [:edit, :update, :destroy]
-  prepend_before_filter :resource_from_invitation_token, :only => [:edit, :destroy]
-  helper_method :after_sign_in_path_for
+  if respond_to? :helper_method
+    helper_method :after_sign_in_path_for
+  end
 
   # GET /resource/invitation/new
   def new
@@ -23,7 +32,11 @@ class Devise::InvitationsController < DeviseController
       if is_flashing_format? && self.resource.invitation_sent_at
         set_flash_message :notice, :send_instructions, :email => self.resource.email
       end
-      respond_with resource, :location => after_invite_path_for(current_inviter)
+      if self.method(:after_invite_path_for).arity == 1
+        respond_with resource, :location => after_invite_path_for(current_inviter)
+      else
+        respond_with resource, :location => after_invite_path_for(current_inviter, resource)
+      end
     else
       respond_with_navigational(resource) { render :new }
     end
@@ -31,12 +44,14 @@ class Devise::InvitationsController < DeviseController
 
   # GET /resource/invitation/accept?invitation_token=abcdef
   def edit
+    set_minimum_password_length if respond_to? :set_minimum_password_length
     resource.invitation_token = params[:invitation_token]
     render :edit
   end
 
   # PUT /resource/invitation
   def update
+    raw_invitation_token = update_resource_params[:invitation_token]
     self.resource = accept_resource
     invitation_accepted = resource.errors.empty?
 
@@ -53,6 +68,7 @@ class Devise::InvitationsController < DeviseController
         respond_with resource, :location => new_session_path(resource_name)
       end
     else
+      resource.invitation_token = raw_invitation_token
       respond_with_navigational(resource){ render :edit }
     end
   end
@@ -101,5 +117,7 @@ class Devise::InvitationsController < DeviseController
     devise_parameter_sanitizer.sanitize(:accept_invitation)
   end
 
+  def translation_scope
+    'devise.invitations'
+  end
 end
-

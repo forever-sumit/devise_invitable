@@ -34,26 +34,38 @@ module Devise
         else
           {:polymorphic => true}
         end
+        if fk = Devise.invited_by_foreign_key
+          belongs_to_options[:foreign_key] = fk
+        end
         if defined?(ActiveRecord) && defined?(ActiveRecord::Base) && self < ActiveRecord::Base
           counter_cache = Devise.invited_by_counter_cache
           belongs_to_options.merge! :counter_cache => counter_cache if counter_cache
+          belongs_to_options.merge! :optional => true if ActiveRecord::VERSION::MAJOR >= 5
         end
         belongs_to :invited_by, belongs_to_options
 
-        include ActiveSupport::Callbacks
-        define_callbacks :invitation_accepted
-
-        attr_writer :skip_password
+        extend ActiveModel::Callbacks
+        define_model_callbacks :invitation_created
+        define_model_callbacks :invitation_accepted
 
         scope :no_active_invitation, lambda { where(:invitation_token => nil) }
         if defined?(Mongoid) && defined?(Mongoid::Document) && self < Mongoid::Document
+          scope :created_by_invite, lambda { where(:invitation_sent_at.ne => nil) }
           scope :invitation_not_accepted, lambda { where(:invitation_accepted_at => nil, :invitation_token.ne => nil) }
           scope :invitation_accepted, lambda { where(:invitation_accepted_at.ne => nil) }
         else
+          scope :created_by_invite, lambda { where(arel_table[:invitation_sent_at].not_eq(nil)) }
           scope :invitation_not_accepted, lambda { where(arel_table[:invitation_token].not_eq(nil)).where(:invitation_accepted_at => nil) }
           scope :invitation_accepted, lambda { where(arel_table[:invitation_accepted_at].not_eq(nil)) }
 
-          [:before_invitation_accepted, :after_invitation_accepted].each do |callback_method|
+          callbacks = [
+            :before_invitation_created,
+            :after_invitation_created,
+            :before_invitation_accepted,
+            :after_invitation_accepted,
+          ]
+
+          callbacks.each do |callback_method|
             send callback_method
           end
         end
@@ -61,7 +73,7 @@ module Devise
 
       def self.required_fields(klass)
         fields = [:invitation_token, :invitation_created_at, :invitation_sent_at, :invitation_accepted_at,
-         :invitation_limit, :invited_by_id, :invited_by_type]
+         :invitation_limit, Devise.invited_by_foreign_key || :invited_by_id, :invited_by_type]
         fields << :invitations_count if defined?(ActiveRecord) && self < ActiveRecord::Base
         fields -= [:invited_by_type] if Devise.invited_by_class_name
         fields
@@ -76,53 +88,68 @@ module Devise
       # Accept an invitation by clearing invitation token and and setting invitation_accepted_at
       # Saves the model and confirms it if model is confirmable, running invitation_accepted callbacks
       def accept_invitation!
-        if self.invited_to_sign_up? && self.valid?
+        if self.invited_to_sign_up?
+          @accepting_invitation = true
           run_callbacks :invitation_accepted do
             self.accept_invitation
             self.confirmed_at = self.invitation_accepted_at if self.respond_to?(:confirmed_at)
-            self.save(:validate => false)
+            self.save
           end
         end
       end
 
+      # Verify wheather a user is created by invitation, irrespective to invitation status
+      def created_by_invite?
+        invitation_sent_at.present?
+      end
+
       # Verifies whether a user has been invited or not
       def invited_to_sign_up?
-        persisted? && invitation_token.present?
+        accepting_invitation? || (persisted? && invitation_token.present?)
       end
 
-      # Verifies whether a user accepted an invitation (or is accepting it)
+      # Returns true if accept_invitation! was called
+      def accepting_invitation?
+        @accepting_invitation
+      end
+
+      # Verifies whether a user accepted an invitation (false when user is accepting it)
       def invitation_accepted?
-        invitation_accepted_at.present?
+        !accepting_invitation? && invitation_accepted_at.present?
       end
 
-      # Verifies whether a user has accepted an invitation (or is accepting it), or was never invited
+      # Verifies whether a user has accepted an invitation (false when user is accepting it), or was never invited
       def accepted_or_not_invited?
         invitation_accepted? || !invited_to_sign_up?
       end
 
       # Reset invitation token and send invitation again
-      def invite!(invited_by = nil)
+      def invite!(invited_by = nil, options = {})
+        # This is an order-dependant assignment, this can't be moved
         was_invited = invited_to_sign_up?
 
         # Required to workaround confirmable model's confirmation_required? method
         # being implemented to check for non-nil value of confirmed_at
-        if self.new_record? && self.respond_to?(:confirmation_required?, true)
+        if new_record_and_responds_to?(:confirmation_required?)
           def self.confirmation_required?; false; end
         end
 
         yield self if block_given?
-        generate_invitation_token if self.invitation_token.nil? || (!skip_invitation || @raw_invitation_token.nil?)
-        self.invitation_created_at = Time.now.utc
-        self.invitation_sent_at = self.invitation_created_at unless skip_invitation
-        self.invited_by = invited_by if invited_by
+        generate_invitation_token if no_token_present_or_skip_invitation?
 
-        # Call these before_validate methods since we aren't validating on save
-        self.downcase_keys if self.new_record? && self.respond_to?(:downcase_keys, true)
-        self.strip_whitespace if self.new_record? && self.respond_to?(:strip_whitespace, true)
+        run_callbacks :invitation_created do
+          self.invitation_created_at = Time.now.utc
+          self.invitation_sent_at = self.invitation_created_at unless skip_invitation
+          self.invited_by = invited_by if invited_by
 
-        if save(:validate => false)
-          self.invited_by.decrement_invitation_limit! if !was_invited and self.invited_by.present?
-          deliver_invitation unless skip_invitation
+          # Call these before_validate methods since we aren't validating on save
+          self.downcase_keys if new_record_and_responds_to?(:downcase_keys)
+          self.strip_whitespace if new_record_and_responds_to?(:strip_whitespace)
+
+          if save(:validate => false)
+            self.invited_by.decrement_invitation_limit! if !was_invited and self.invited_by.present?
+            deliver_invitation(options) unless skip_invitation
+          end
         end
       end
 
@@ -134,17 +161,23 @@ module Devise
       end
 
       # Only verify password when is not invited
-      def active_for_authentication?
-        super unless invited_to_sign_up?
+      def valid_password?(password)
+        super unless !accepting_invitation? && block_from_invitation?
       end
 
-      def inactive_message
-        invited_to_sign_up? ? :invited : super
+      # Enforce password when invitation is being accepted
+      def password_required?
+        (accepting_invitation? && self.class.require_password_on_accepting) || super
       end
 
-      def after_password_reset
+      def unauthenticated_message
+        block_from_invitation? ? :invited : super
+      end
+
+      def clear_reset_password_token
+        reset_password_token_present = reset_password_token.present?
         super
-        accept_invitation! if invited_to_sign_up?
+        accept_invitation! if reset_password_token_present && invited_to_sign_up?
       end
 
       def clear_errors_on_valid_keys
@@ -154,10 +187,10 @@ module Devise
       end
 
       # Deliver the invitation email
-      def deliver_invitation
+      def deliver_invitation(options = {})
         generate_invitation_token! unless @raw_invitation_token
         self.update_attribute :invitation_sent_at, Time.now.utc unless self.invitation_sent_at
-        send_devise_notification(:invitation_instructions, @raw_invitation_token)
+        send_devise_notification(:invitation_instructions, @raw_invitation_token, options)
       end
 
       # provide alias to the encrypted invitation_token stored by devise
@@ -169,14 +202,18 @@ module Devise
         respond_to?(:confirmation_required?, true) && confirmation_required?
       end
 
-      protected
-        # Overriding the method in Devise's :validatable module so password is not required on inviting
-        def password_required?
-          !skip_password && super
-        end
+      def invitation_due_at
+        return nil if (self.class.invite_for == 0 || self.class.invite_for.nil?)
+        #return nil unless self.class.invite_for
 
-        def skip_password
-          @skip_password ||= false
+        time = self.invitation_created_at || self.invitation_sent_at
+        time + self.class.invite_for
+      end
+
+      protected
+
+        def block_from_invitation?
+          invited_to_sign_up?
         end
 
         # Checks if the invitation for the user is within the limit time.
@@ -215,6 +252,14 @@ module Devise
           generate_invitation_token && save(:validate => false)
         end
 
+        def new_record_and_responds_to?(method)
+          self.new_record? && self.respond_to?(method, true)
+        end
+
+        def no_token_present_or_skip_invitation?
+          self.invitation_token.nil? || (!skip_invitation || @raw_invitation_token.nil?)
+        end
+
       module ClassMethods
         # Return fields to invite
         def invite_key_fields
@@ -228,7 +273,7 @@ module Devise
         # email is resent unless resend_invitation is set to false.
         # Attributes must contain the user's email, other attributes will be
         # set in the record
-        def _invite(attributes={}, invited_by=nil, &block)
+        def _invite(attributes={}, invited_by=nil, options = {}, &block)
           invite_key_array = invite_key_fields
           attributes_hash = {}
           invite_key_array.each do |k,v|
@@ -240,8 +285,10 @@ module Devise
           invitable = find_or_initialize_with_errors(invite_key_array, attributes_hash)
           invitable.assign_attributes(attributes)
           invitable.invited_by = invited_by
+          unless invitable.password || invitable.encrypted_password.present?
+            invitable.password = random_password
+          end
 
-          invitable.skip_password = true
           invitable.valid? if self.validate_on_invite
           if invitable.new_record?
             invitable.clear_errors_on_valid_keys if !self.validate_on_invite
@@ -252,16 +299,16 @@ module Devise
           end
 
           yield invitable if block_given?
-          mail = invitable.invite! if invitable.errors.empty?
+          mail = invitable.invite!(nil, options) if invitable.errors.empty?
           [invitable, mail]
         end
 
-        def invite!(attributes={}, invited_by=nil, &block)
-          _invite(attributes.with_indifferent_access, invited_by, &block).first
+        def invite!(attributes={}, invited_by=nil, options = {}, &block)
+          _invite(attributes.with_indifferent_access, invited_by, options, &block).first
         end
 
-        def invite_mail!(attributes={}, invited_by=nil, &block)
-          _invite(attributes, invited_by, &block).last
+        def invite_mail!(attributes={}, invited_by=nil, options = {}, &block)
+          _invite(attributes, invited_by, options, &block).last
         end
 
         # Attempt to find a user by it's invitation_token to set it's password.
@@ -284,11 +331,18 @@ module Devise
 
           invitable = find_or_initialize_with_error_by(:invitation_token, invitation_token)
           invitable.errors.add(:invitation_token, :invalid) if invitable.invitation_token && invitable.persisted? && !invitable.valid_invitation?
-          invitable.invitation_token = original_token
           invitable unless only_valid && invitable.errors.present?
         end
 
         # Callback convenience methods
+        def before_invitation_created(*args, &blk)
+          set_callback(:invitation_created, :before, *args, &blk)
+        end
+
+        def after_invitation_created(*args, &blk)
+          set_callback(:invitation_created, :after, *args, &blk)
+        end
+
         def before_invitation_accepted(*args, &blk)
           set_callback(:invitation_accepted, :before, *args, &blk)
         end
@@ -304,8 +358,20 @@ module Devise
         Devise::Models.config(self, :invite_key)
         Devise::Models.config(self, :resend_invitation)
         Devise::Models.config(self, :allow_insecure_sign_in_after_accept)
+        Devise::Models.config(self, :require_password_on_accepting)
+
+        private
+
+        # The random password, as set after an invitation, must conform
+        # to any password format validation rules of the application.
+        # This default fixes the most common scenarios: Passwords must contain
+        # lower + upper case, a digit and a symbol.
+        # For more unusual rules, this method can be overridden.
+        def random_password
+          "aA1!" + Devise.friendly_token[0, 20]
+        end
+
       end
     end
   end
 end
-

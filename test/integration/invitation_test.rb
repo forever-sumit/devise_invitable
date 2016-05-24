@@ -64,6 +64,25 @@ class InvitationTest < ActionDispatch::IntegrationTest
     assert_equal root_path, current_path
   end
 
+  test 'invited user without password should not be able to sign in' do
+    user = User.invite!(:email => "valid@email.com")
+    user.password = 'test'
+    sign_in_as_user user
+
+    assert_equal new_user_session_path, current_path
+    assert page.has_css?('p#alert', :text => 'You have a pending invitation, accept it to finish creating your account.')
+  end
+
+  test 'invited user with password should not be able to sign in' do
+    user = User.invite!(:email => "valid@email.com")
+    user.password = '987654321'
+    user.save
+    sign_in_as_user user
+
+    assert_equal new_user_session_path, current_path
+    assert page.has_css?('p#alert', :text => 'You have a pending invitation, accept it to finish creating your account.')
+  end
+
   test 'not authenticated user with invalid invitation token should not be able to set his password' do
     user = User.invite!(:email => "valid@email.com")
     user.accept_invitation!
@@ -80,7 +99,7 @@ class InvitationTest < ActionDispatch::IntegrationTest
     end
     assert_equal user_invitation_path, current_path
     assert page.has_css?('#error_explanation li', :text => /Password .*doesn\'t match/)
-    assert user.encrypted_password.blank?
+    assert !user.confirmed?
   end
 
   test 'not authenticated user with valid data should be able to change his password' do
@@ -90,6 +109,7 @@ class InvitationTest < ActionDispatch::IntegrationTest
     assert_equal root_path, current_path
     assert page.has_css?('p#notice', :text => 'Your password was set successfully. You are now signed in.')
     assert user.reload.valid_password?('987654321')
+    assert user.confirmed?
   end
 
   test 'after entering invalid data user should still be able to set his password' do
@@ -99,7 +119,6 @@ class InvitationTest < ActionDispatch::IntegrationTest
     end
     assert_equal user_invitation_path, current_path
     assert page.has_css?('#error_explanation')
-    assert user.encrypted_password.blank?
 
     set_password :visit => false
     assert page.has_css?('p#notice', :text => 'Your password was set successfully. You are now signed in.')

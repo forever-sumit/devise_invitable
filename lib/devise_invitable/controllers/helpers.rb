@@ -2,11 +2,10 @@ module DeviseInvitable::Controllers::Helpers
   extend ActiveSupport::Concern
 
   included do
-    hide_action :after_invite_path_for, :after_accept_path_for
   end
   
-  def after_invite_path_for(resource)
-    after_sign_in_path_for(resource)
+  def after_invite_path_for(inviter, invitee = nil)
+    after_sign_in_path_for(inviter)
   end
   
   def after_accept_path_for(resource)

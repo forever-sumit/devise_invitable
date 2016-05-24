@@ -29,9 +29,9 @@ class InvitableTest < ActiveSupport::TestCase
     user = new_user
     user.invite!
 
-    assert_not_nil user.invitation_token
-    assert_not_nil user.raw_invitation_token
-    assert_not_nil user.invitation_created_at
+    refute_nil user.invitation_token
+    refute_nil user.raw_invitation_token
+    refute_nil user.invitation_created_at
 
     3.times do
       user = User.find(user.id)
@@ -40,7 +40,7 @@ class InvitableTest < ActiveSupport::TestCase
         user.invite!
         user.invitation_token
       }.call
-      assert_not_nil user.raw_invitation_token
+      refute_nil user.raw_invitation_token
     end
   end
 
@@ -49,8 +49,8 @@ class InvitableTest < ActiveSupport::TestCase
     user.skip_invitation = true
     user.invite!
 
-    assert_not_nil user.invitation_token
-    assert_not_nil user.invitation_created_at
+    refute_nil user.invitation_token
+    refute_nil user.invitation_created_at
 
     3.times do
       user = User.find(user.id)
@@ -60,8 +60,8 @@ class InvitableTest < ActiveSupport::TestCase
         user.invite!
         user.invitation_token
       }.call
-      assert_not_nil user.invitation_token
-      assert_not_nil user.raw_invitation_token
+      refute_nil user.invitation_token
+      refute_nil user.raw_invitation_token
     end
   end
 
@@ -88,8 +88,8 @@ class InvitableTest < ActiveSupport::TestCase
     user.update_attributes(:invitation_sent_at => old_invitation_sent_at, :invitation_created_at => old_invitation_created_at)
     3.times do
       user.invite!
-      assert_not_equal old_invitation_sent_at, user.invitation_sent_at
-      assert_not_equal old_invitation_created_at, user.invitation_created_at
+      refute_equal old_invitation_sent_at, user.invitation_sent_at
+      refute_equal old_invitation_created_at, user.invitation_created_at
       user.update_attributes(:invitation_sent_at => old_invitation_sent_at, :invitation_created_at => old_invitation_created_at)
     end
   end
@@ -99,27 +99,51 @@ class InvitableTest < ActiveSupport::TestCase
 
     User.stubs(:invite_for).returns(nil)
     user.invitation_created_at = Time.now.utc
-    assert user.valid_invitation?
+    assert_predicate user, :valid_invitation?
 
     User.stubs(:invite_for).returns(nil)
     user.invitation_created_at = 1.year.ago
-    assert user.valid_invitation?
+    assert_predicate user, :valid_invitation?
 
     User.stubs(:invite_for).returns(0)
     user.invitation_created_at = Time.now.utc
-    assert user.valid_invitation?
+    assert_predicate user, :valid_invitation?
 
     User.stubs(:invite_for).returns(0)
     user.invitation_created_at = 1.day.ago
-    assert user.valid_invitation?
+    assert_predicate user, :valid_invitation?
 
     User.stubs(:invite_for).returns(1.day)
     user.invitation_created_at = Time.now.utc
-    assert user.valid_invitation?
+    assert_predicate user, :valid_invitation?
 
     User.stubs(:invite_for).returns(1.day)
     user.invitation_created_at = 2.days.ago
-    assert !user.valid_invitation?
+    refute_predicate user, :valid_invitation?
+  end
+
+  test 'should return token validity when there is invite_for' do
+    User.stubs(:invite_for).returns(1.day)
+
+    user = User.invite!(:email => "valid@email.com")
+    sent_at = user.invitation_created_at || user.invitation_sent_at
+    valid_until = sent_at + User.invite_for
+
+    assert_equal user.invitation_due_at, valid_until
+  end
+
+  test 'should return nil for invitation due date when invite_for is nil' do
+    User.stubs(:invite_for).returns(nil)
+    user = User.invite!(:email => "valid@email.com")
+
+    assert_equal user.invitation_due_at, nil
+  end
+
+  test 'should return nil for invitation due date when invite_for is 0' do
+    User.stubs(:invite_for).returns(0)
+    user = User.invite!(email: 'valid@email.com')
+
+    assert_equal user.invitation_due_at, nil
   end
 
   test 'should never generate the same invitation token for different users' do
@@ -128,7 +152,7 @@ class InvitableTest < ActiveSupport::TestCase
       user = new_user
       user.invite!
       token = user.invitation_token
-      assert !invitation_tokens.include?(token)
+      refute_includes invitation_tokens, token
       invitation_tokens << token
     end
   end
@@ -136,36 +160,49 @@ class InvitableTest < ActiveSupport::TestCase
   test 'should invite with multiple columns for invite key' do
     User.stubs(:invite_key).returns(:email => Devise.email_regexp, :username => /\A.+\z/)
     user = User.invite!(:email => "valid@email.com", :username => "name")
-    assert user.persisted?
-    assert user.errors.empty?
+    assert_predicate user, :persisted?
+    assert_empty user.errors
   end
 
   test 'should allow non-string columns for invite key' do
     User.stubs(:invite_key).returns(:email => Devise.email_regexp, :profile_id => :present?.to_proc, :active => true)
     user = User.invite!(:email => "valid@email.com", :profile_id => 1, :active => true)
-    assert user.persisted?
-    assert user.errors.empty?
+    assert_predicate user, :persisted?
+    assert_empty user.errors
   end
 
   test 'should not invite with some missing columns when invite key is an array' do
     User.stubs(:invite_key).returns(:email => Devise.email_regexp, :username => /\A.+\z/, :profile_id => :present?.to_proc, :active => true)
     user = User.invite!(:email => "valid@email.com")
-    assert user.new_record?
-    assert user.errors.present?
+    assert_predicate user, :new_record?
+    refute_empty user.errors
     assert user.errors[:username]
     assert user.errors[:profile_id]
     assert user.errors[:active]
-    assert user.errors[:email].empty?
+    assert_empty user.errors[:email]
   end
 
   test 'should return mail object' do
     mail = User.invite_mail!(:email => 'valid@email.com')
-    assert mail.class.name == 'Mail::Message'
+    assert_instance_of Mail::Message, mail
   end
 
   test 'should disallow login when invited' do
     invited_user = User.invite!(:email => "valid@email.com")
-    assert !invited_user.valid_password?('1234')
+    refute invited_user.valid_password?('1234')
+  end
+
+  test 'should not accept invite without password' do
+    User.invite!(:email => "valid@email.com")
+    User.accept_invitation!(:invitation_token => Thread.current[:token])
+    refute_predicate User.where(:email => 'valid@email.com').first, :invitation_accepted?
+  end
+
+  test 'should accept invite without password if enforce is disabled' do
+    Devise.stubs(:require_password_on_accepting => false)
+    User.invite!(:email => "valid@email.com")
+    User.accept_invitation!(:invitation_token => Thread.current[:token])
+    assert_predicate User.where(:email => 'valid@email.com').first, :invitation_accepted?
   end
 
   test 'should set password and password confirmation from params' do
@@ -178,7 +215,12 @@ class InvitableTest < ActiveSupport::TestCase
     user = User.invite!(:email => "valid@email.com")
     old_encrypted_password = user.encrypted_password
     user = User.accept_invitation!(:invitation_token => Thread.current[:token], :password => '123456789', :password_confirmation => '123456789')
-    assert_not_equal old_encrypted_password, user.encrypted_password
+    refute_equal old_encrypted_password, user.encrypted_password
+  end
+
+  test 'should not override password on invite!' do
+    user = User.invite!(:email => "valid@email.com", :password => 'password', :password_confirmation => 'password', :skip_invitation => true)
+    assert user.valid?
   end
 
   test 'should clear invitation token and set invitation_accepted_at while accepting the password' do
@@ -195,8 +237,10 @@ class InvitableTest < ActiveSupport::TestCase
     user = User.invite!(:email => "valid@email.com")
     assert user.invitation_token.present?
     assert_nil user.invitation_accepted_at
+    old_encrypted_password = user.encrypted_password
     User.accept_invitation!(:invitation_token => user.invitation_token, :password => '123456789', :password_confirmation => '987654321')
     user.reload
+    assert_equal old_encrypted_password, user.encrypted_password
     assert user.invitation_token.present?
     assert_nil user.invitation_accepted_at
   end
@@ -213,7 +257,7 @@ class InvitableTest < ActiveSupport::TestCase
     User.reset_password_by_token(:reset_password_token => token, :password => '123456789', :password_confirmation => '123456789')
     assert_nil user.reload.reset_password_token
     assert_nil user.reload.invitation_token
-    assert !user.invited_to_sign_up?
+    refute_predicate user, :invited_to_sign_up?
   end
 
   test 'should not accept invitation on failing to reset the password' do
@@ -233,7 +277,7 @@ class InvitableTest < ActiveSupport::TestCase
 
   test 'should not set invitation_accepted_at if just resetting password' do
     user = User.create!(:email => "valid@email.com", :password => "123456780")
-    assert !user.invited_to_sign_up?
+    refute_predicate user, :invited_to_sign_up?
     token, user.reset_password_token = Devise.token_generator.generate(User, :reset_password_token)
     user.reset_password_sent_at = Time.now.utc
     user.save
@@ -250,30 +294,30 @@ class InvitableTest < ActiveSupport::TestCase
     assert_difference('ActionMailer::Base.deliveries.size') do
       token = user.invitation_token
       user.invite!
-      assert_not_equal token, user.invitation_token
+      refute_equal token, user.invitation_token
     end
   end
 
   test 'should return a record with invitation token and no errors to send invitation by email' do
     invited_user = User.invite!(:email => "valid@email.com")
-    assert invited_user.errors.blank?
-    assert invited_user.invitation_token.present?
+    assert_empty invited_user.errors
+    assert_predicate invited_user.invitation_token, :present?
     assert_equal 'valid@email.com', invited_user.email
-    assert invited_user.persisted?
+    assert_predicate invited_user, :persisted?
   end
 
   test 'should set all attributes with no errors' do
     invited_user = User.invite!(:email => "valid@email.com", :username => 'first name')
-    assert invited_user.errors.blank?
+    assert_empty invited_user.errors
     assert_equal 'first name', invited_user.username
-    assert invited_user.persisted?
+    assert_predicate invited_user, :persisted?
   end
 
   test 'should not validate other attributes when validate_on_invite is disabled' do
     validate_on_invite = User.validate_on_invite
     User.validate_on_invite = false
     invited_user = User.invite!(:email => "valid@email.com", :username => "a"*50)
-    assert invited_user.errors.empty?
+    assert_empty invited_user.errors
     User.validate_on_invite = validate_on_invite
   end
 
@@ -281,7 +325,7 @@ class InvitableTest < ActiveSupport::TestCase
     validate_on_invite = User.validate_on_invite
     User.validate_on_invite = true
     invited_user = User.invite!(:email => "valid@email.com", :username => "a"*50)
-    assert invited_user.errors[:username].present?
+    refute_empty invited_user.errors[:username]
     User.validate_on_invite = validate_on_invite
   end
 
@@ -289,8 +333,8 @@ class InvitableTest < ActiveSupport::TestCase
     validate_on_invite = User.validate_on_invite
     User.validate_on_invite = true
     invited_user = User.invite!(:email => "valid@email.com", :username => "a"*50)
-    assert invited_user.errors.present?
-    assert invited_user.errors[:password].empty?
+    refute_empty invited_user.errors
+    assert_empty invited_user.errors[:password]
     User.validate_on_invite = validate_on_invite
   end
 
@@ -298,8 +342,8 @@ class InvitableTest < ActiveSupport::TestCase
     validate_on_invite = User.validate_on_invite
     User.validate_on_invite = true
     invited_user = User.invite!(:email => "", :username => "a"*50)
-    assert invited_user.errors[:email].present?
-    assert invited_user.errors[:username].present?
+    refute_empty invited_user.errors[:email]
+    refute_empty invited_user.errors[:username]
     User.validate_on_invite = validate_on_invite
   end
 
@@ -340,7 +384,7 @@ class InvitableTest < ActiveSupport::TestCase
       user = User.invite!(:email => "valid@email.com", :username => "a"*50)
       assert_equal user, existing_user
       assert_equal ['has already been taken'], user.errors[:email]
-      assert user.errors[:username].present?
+      refute_empty user.errors[:username]
     ensure
       User.validate_on_invite = validate_on_invite
     end
@@ -362,7 +406,7 @@ class InvitableTest < ActiveSupport::TestCase
     invited_user = User.invite!(:email => "invalid_email.com", :username => 'first name')
     assert invited_user.new_record?
     assert_equal 'first name', invited_user.username
-    assert invited_user.errors.present?
+    refute_empty invited_user.errors
   end
 
   test 'should find a user to set his password based on invitation_token' do
@@ -426,11 +470,26 @@ class InvitableTest < ActiveSupport::TestCase
       :password_confirmation => 'new_password',
       :username => 'a'*50
     )
-    assert invited_user.errors[:username].present?
+    refute_empty invited_user.errors[:username]
 
     user.reload
-    assert !user.valid_password?('new_password')
+    refute user.valid_password?('new_password')
   end
+
+  test 'should check if created by invitation' do
+    user = User.invite!(:email => "valid@email.com")
+    assert user.created_by_invite?
+
+    invited_user = User.accept_invitation!(
+      :invitation_token => Thread.current[:token],
+      :password => 'new_password',
+      :password_confirmation => 'new_password',
+      :username => 'a'
+    )
+    user.reload
+    assert user.created_by_invite?
+  end
+
 
   test 'should set other attributes on accepting invitation' do
     user = new_user(:password => nil, :password_confirmation => nil)
@@ -454,7 +513,7 @@ class InvitableTest < ActiveSupport::TestCase
 
     user.invite!
 
-    assert !user.confirmed?
+    refute_predicate user, :confirmed?
   end
 
   test 'user.has_invitations_left? test' do
@@ -470,7 +529,7 @@ class InvitableTest < ActiveSupport::TestCase
     # With an individual invitation_limit of 0, a user shouldn't be able to send an invitation
     user.invitation_limit = 0
     assert user.save
-    assert !user.has_invitations_left?
+    refute_predicate user, :has_invitations_left?
 
     # With in invitation_limit of 2, a user should be able to send two invitations
     user.invitation_limit = 2
@@ -498,7 +557,7 @@ class InvitableTest < ActiveSupport::TestCase
     assert_no_difference('ActionMailer::Base.deliveries.size') do
       user.invite!
     end
-    assert user.invitation_created_at.present?
+    assert_predicate user, :invitation_created_at
     assert_nil user.invitation_sent_at
   end
 
@@ -509,7 +568,7 @@ class InvitableTest < ActiveSupport::TestCase
         u.skip_invitation = true
       end
     end
-    assert user.invitation_created_at.present?
+    assert_predicate user, :invitation_created_at
     assert_nil user.invitation_sent_at
   end
 
@@ -530,17 +589,17 @@ class InvitableTest < ActiveSupport::TestCase
 
   test 'user.accept_invitation! should trigger callbacks' do
     user = User.invite!(:email => "valid@email.com")
-    assert_callbacks_not_fired user
+    assert_callbacks_not_fired :after_invitation_accepted, user
     user.accept_invitation!
-    assert_callbacks_fired user
+    assert_callbacks_fired :after_invitation_accepted, user
   end
 
   test 'user.accept_invitation! should not trigger callbacks if validation fails' do
     user = User.invite!(:email => "valid@email.com")
-    assert_callbacks_not_fired user
+    assert_callbacks_not_fired :after_invitation_accepted, user
     user.username='a'*50
     user.accept_invitation!
-    assert_callbacks_not_fired user
+    assert_callbacks_not_fired :after_invitation_accepted, user
   end
 
   test 'user.accept_invitation! should confirm user if confirmable' do
@@ -548,26 +607,28 @@ class InvitableTest < ActiveSupport::TestCase
     user.accept_invitation!
 
     assert user.confirmed?
+    refute user.changed?
   end
 
   test 'user.accept_invitation! should not confirm user if validation fails' do
     user = User.invite!(:email => "valid@email.com")
     user.username='a'*50
     user.accept_invitation!
+    user.reload
 
-    assert !user.confirmed?
+    refute_predicate user, :confirmed?
   end
 
-  def assert_callbacks_fired(user)
-    assert_callbacks_status user, true
+  def assert_callbacks_fired(callback, user)
+    assert_callbacks_status callback, user, true
   end
 
-  def assert_callbacks_not_fired(user)
-    assert_callbacks_status user, nil
+  def assert_callbacks_not_fired(callback, user)
+    assert_callbacks_status callback, user, nil
   end
 
-  def assert_callbacks_status(user, fired)
-    assert_equal fired, user.callback_works
+  def assert_callbacks_status(callback, user, fired)
+    assert_equal fired, user.send("#{callback}_callback_works".to_sym)
   end
 
   test "user.invite! should downcase the class's case_insensitive_keys" do
@@ -583,52 +644,82 @@ class InvitableTest < ActiveSupport::TestCase
     assert user.active == true
   end
 
+  test "user.invite! should trigger callbacks" do
+    user = User.new(email: "valid@email.com")
+    assert_callbacks_not_fired :after_invitation_created, user
+    user.invite!
+    assert_callbacks_fired :after_invitation_created, user
+  end
+
   test 'should pass validation before accept if field is required in post-invited instance' do
     user = User.invite!(:email => "valid@email.com")
     user.testing_accepted_or_not_invited = true
-    assert_equal true, user.valid?
+    user.valid?
+    assert_empty user.errors
   end
 
   test 'should fail validation after accept if field is required in post-invited instance' do
     user = User.invite!(:email => "valid@email.com")
     user.testing_accepted_or_not_invited = true
-    user.accept_invitation!
-    assert_equal false, user.valid?
+    assert_predicate user, :accept_invitation!
+    user = User.where(:email => "valid@email.com").first
+    user.valid?
+    refute_empty user.errors
   end
 
   test 'should pass validation after accept if field is required in post-invited instance' do
     user = User.invite!(:email => "valid@email.com")
     user.username = 'test'
     user.testing_accepted_or_not_invited = true
+    assert_predicate user, :accept_invitation!
+    user = User.where(:email => "valid@email.com").first
     user.bio = "Test"
-    user.accept_invitation!
-    assert_equal true, user.valid?
+    user.valid?
+    assert_empty user.errors
   end
 
   test 'should return instance with errors if invitation_token is nil' do
     User.create(:email => 'admin@test.com', :password => '123456', :password_confirmation => '123456')
     user = User.accept_invitation!
-    assert !user.errors.empty?
+    refute_empty user.errors
   end
 
-  test "should count accepted and not accepted invitations" do
+  test "should count invited, created_by_invite, accepted and not accepted invitations" do
     assert_equal 0, User.invitation_not_accepted.count
     assert_equal 0, User.invitation_accepted.count
+    assert_equal 0, User.created_by_invite.count
 
     User.invite!(:email => "invalid@email.com")
+    User.invite!(:email => "another_invalid@email.com")
     user = User.invite!(:email => "valid@email.com")
 
-    assert_equal 2, User.invitation_not_accepted.count
+    assert_equal 3, User.invitation_not_accepted.count
     assert_equal 0, User.invitation_accepted.count
+    assert_equal 3, User.created_by_invite.count
 
     user.accept_invitation!
-    assert_equal 1, User.invitation_not_accepted.count
+    assert_equal 2, User.invitation_not_accepted.count
     assert_equal 1, User.invitation_accepted.count
+    assert_equal 3, User.created_by_invite.count
   end
 
   test "should preserve return values of Devise::Recoverable#reset_password!" do
     user = new_user
     retval = user.reset_password!('anewpassword', 'anewpassword')
     assert_equal true, retval
+  end
+
+  test 'should set initial password with variety of characters' do
+    PASSWORD_FORMAT = /\A
+        (?=.*\d)           # Must contain a digit
+        (?=.*[a-z])        # Must contain a lower case character
+        (?=.*[A-Z])        # Must contain an upper case character
+        (?=.*[[:^alnum:]]) # Must contain a symbol
+      /x
+    User.stubs(:invite_key).returns(:password => PASSWORD_FORMAT)
+    Devise.stubs(:friendly_token).returns('onlylowercaseletters')
+    user = User.invite!(:email => "valid@email.com")
+    assert user.persisted?
+    assert user.errors.empty?
   end
 end
